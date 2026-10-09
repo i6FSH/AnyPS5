@@ -23,6 +23,7 @@ void APS5_VABI sceKernelAioInitializeParam(void* param);
 int APS5_VABI sceKernelAioSubmitReadCommands(KernelAioRwRequest* req, std::int32_t size, std::int32_t prio, std::int32_t* id);
 int APS5_VABI sceKernelAioSubmitWriteCommands(KernelAioRwRequest* req, std::int32_t size, std::int32_t prio, std::int32_t* id);
 int APS5_VABI sceKernelAioPollRequest(std::int32_t id, std::int32_t* state);
+int APS5_VABI sceKernelAioPollRequests(std::int32_t* id, std::int32_t num, std::int32_t* state);
 int APS5_VABI sceKernelAioWaitRequest(std::int32_t id, std::int32_t* state, std::uint32_t* usec);
 int APS5_VABI sceKernelAioSubmitReadCommandsMultiple(KernelAioRwRequest* req, std::int32_t size, std::int32_t prio, std::int32_t* id);
 int APS5_VABI sceKernelAioSubmitWriteCommandsMultiple(KernelAioRwRequest* req, std::int32_t size, std::int32_t prio, std::int32_t* id);
@@ -113,6 +114,16 @@ int main() {
     std::int32_t writeStates[2] = {0, 0};
     Check(sceKernelAioWaitRequests(writeIds, 2, writeStates, 1, nullptr) == 0);
     Check(writeStates[0] == 3 && writeStates[1] == 4);
+    std::array<std::int32_t, 3> pollIds = {writeIds[1], writeIds[0], writeIds[1]};
+    const auto originalPollIds = pollIds;
+    std::array<std::int32_t, 5> pollStates = {7, 7, 7, 7, 7};
+    Check(sceKernelAioPollRequests(pollIds.data(), 3, pollStates.data() + 1) == 0);
+    Check((pollStates == std::array<std::int32_t, 5>{7, 4, 3, 4, 7}));
+    Check(pollIds == originalPollIds);
+    for (std::size_t i = 0; i < pollIds.size(); ++i) {
+        Check(sceKernelAioPollRequest(pollIds[i], &polled) == 0);
+        Check(polled == pollStates[i + 1]);
+    }
     std::array<char, 4> readBack{};
     std::array<char, 4> tail{};
     KernelAioResult readBackResult{-1, 0};
@@ -132,11 +143,16 @@ int main() {
     std::uint32_t timeout = 1000;
     Check(sceKernelAioWaitRequests(readIds, 2, readStates, 2, &timeout) == 0);
     Check(readStates[0] == 3 && readStates[1] == 3);
+    readStates[0] = readStates[1] = 7;
+    Check(sceKernelAioPollRequests(readIds, 2, readStates) == 0);
+    Check(readStates[0] == 3 && readStates[1] == 3);
     std::int32_t cancelled = 0;
     Check(sceKernelAioCancelRequest(readIds[0], &cancelled) == 0);
     Check(cancelled == 4);
     Check(sceKernelAioPollRequest(readIds[0], &polled) == 0);
     Check(polled == 4);
+    Check(sceKernelAioPollRequests(readIds, 2, readStates) == 0);
+    Check(readStates[0] == 4 && readStates[1] == 3);
     Check(sceKernelAioCancelRequest(0, &cancelled) == 0);
     Check(cancelled == 2);
     std::int32_t cancelIds[2] = {0, readIds[1]};
@@ -150,6 +166,8 @@ int main() {
     Check(deletedRets[0] == 0 && deletedRets[1] == 0);
     Check(sceKernelAioPollRequest(writeIds[0], &polled) == 0);
     Check(polled == 4);
+    Check(sceKernelAioPollRequests(writeIds, 2, writeStates) == 0);
+    Check(writeStates[0] == 4 && writeStates[1] == 4);
     Check(sceKernelAioDeleteRequests(writeIds, 0, deletedRets) == 0);
     Check(sceKernelClose(batchFd) == 0);
     std::int32_t badIds[2] = {readIds[0], 9999};
@@ -181,6 +199,27 @@ int main() {
     Check(sceKernelAioDeleteRequests(badIds, 2, untouched) == SCE_KERNEL_ERROR_EINVAL);
     Check(untouched[0] == 7 && untouched[1] == 7);
     Check(sceKernelAioDeleteRequests(writeIds, 2, nullptr) == SCE_KERNEL_ERROR_EFAULT);
+    Check(sceKernelAioPollRequests(nullptr, 2, untouched) == SCE_KERNEL_ERROR_EFAULT);
+    Check(untouched[0] == 7 && untouched[1] == 7);
+    Check(sceKernelAioPollRequests(readIds, 2, nullptr) == SCE_KERNEL_ERROR_EFAULT);
+    Check(sceKernelAioPollRequests(readIds, -1, untouched) == SCE_KERNEL_ERROR_EINVAL);
+    Check(untouched[0] == 7 && untouched[1] == 7);
+    Check(sceKernelAioPollRequests(badIds, 0, untouched) == 0);
+    Check(untouched[0] == 7 && untouched[1] == 7);
+    for (std::int32_t invalid : {-1, 0, 512, 9999}) {
+        badIds[1] = invalid;
+        Check(sceKernelAioPollRequests(badIds, 2, untouched) == SCE_KERNEL_ERROR_EINVAL);
+        Check(untouched[0] == 7 && untouched[1] == 7);
+    }
+    manyStates.fill(7);
+    Check(sceKernelAioPollRequests(manyIds.data(), 128, manyStates.data()) == 0);
+    for (std::size_t i = 0; i < 128; ++i) Check(manyStates[i] == 4);
+    Check(manyStates[128] == 7);
+    manyStates.fill(7);
+    threw = false;
+    try { sceKernelAioPollRequests(manyIds.data(), 129, manyStates.data()); } catch (const std::runtime_error&) { threw = true; }
+    Check(threw);
+    for (const auto value : manyStates) Check(value == 7);
     const auto shared = root / "shared.bin";
     std::string sharedContents;
     for (char letter : {'A', 'B', 'C', 'D'}) sharedContents.append(1024, letter);
